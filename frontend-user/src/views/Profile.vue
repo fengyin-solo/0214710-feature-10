@@ -257,7 +257,10 @@ export default {
       this.showLogoutModal = false
       logger.info('User logging out')
       await logout()
-      this.$router.push('/login')
+      // 登录以弹窗形式存在，没有独立登录页；退出后回到首页
+      if (this.$route.path !== '/') {
+        this.$router.push('/')
+      }
     },
     showNotification(type, title, message) { this.toastType = type; this.toastTitle = title; this.toastMessage = message; this.showToast = true }
   }

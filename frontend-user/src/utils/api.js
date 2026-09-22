@@ -33,6 +33,39 @@ const taskStore = ts
  */
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms))
 
+// ==================== 会话过期事件 ====================
+
+/**
+ * 会话过期（401）订阅者集合
+ * auth 模块通过 onSessionExpired 订阅，避免 api -> auth 直接循环引用
+ */
+const sessionExpiredListeners = new Set()
+
+/**
+ * 订阅会话过期事件
+ * @param {Function} callback
+ * @returns {Function} 取消订阅函数
+ */
+export function onSessionExpired(callback) {
+  if (typeof callback === 'function') {
+    sessionExpiredListeners.add(callback)
+  }
+  return () => sessionExpiredListeners.delete(callback)
+}
+
+/**
+ * 通知会话过期
+ */
+function emitSessionExpired() {
+  sessionExpiredListeners.forEach(fn => {
+    try {
+      fn()
+    } catch (e) {
+      logger.error('Session expired listener failed', e)
+    }
+  })
+}
+
 /**
  * 日志记录器
  * 根据配置的日志级别输出不同级别的日志
@@ -137,6 +170,17 @@ async function request(url, options = {}) {
     
     // 检查HTTP状态码
     if (!response.ok) {
+      // 401/403：登录已过期或凭证无效，通知全局清理登录态
+      if (response.status === 401 || response.status === 403) {
+        logger.warn(`API auth failure: ${url}`, { status: response.status })
+        emitSessionExpired()
+        return {
+          success: false,
+          error: '登录已过期，请重新登录',
+          code: 'SESSION_EXPIRED'
+        }
+      }
+
       const errorData = await response.json().catch(() => ({}))
       throw new Error(errorData.error || `HTTP ${response.status}: ${response.statusText}`)
     }

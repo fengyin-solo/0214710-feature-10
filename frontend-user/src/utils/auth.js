@@ -21,6 +21,7 @@
 
 import { reactive } from 'vue'
 import { api, logger } from './api'
+import { taskStore } from './taskStore'
 
 // ==================== 常量定义 ====================
 
@@ -59,6 +60,41 @@ export const authState = reactive({
   loading: false,
   error: null
 })
+
+// ==================== 认证事件订阅 ====================
+
+/**
+ * 认证事件订阅者
+ * 事件类型：login（登录成功）/ logout（主动退出）/ expired（登录过期）
+ */
+const authListeners = new Set()
+
+/**
+ * 订阅认证状态变化
+ * @param {Function} callback - (event: {type, user}) => void
+ * @returns {Function} 取消订阅函数
+ */
+export function onAuthChange(callback) {
+  if (typeof callback === 'function') {
+    authListeners.add(callback)
+  }
+  return () => authListeners.delete(callback)
+}
+
+/**
+ * 发布认证事件
+ * @param {string} type - login / logout / expired
+ */
+function emitAuthEvent(type) {
+  const event = { type, user: authState.user }
+  authListeners.forEach(fn => {
+    try {
+      fn(event)
+    } catch (e) {
+      logger.error('Auth listener failed', e)
+    }
+  })
+}
 
 // ==================== 公共方法 ====================
 
@@ -127,7 +163,11 @@ export async function login(username, password) {
       // 持久化存储
       localStorage.setItem(AUTH_TOKEN_KEY, token)
       localStorage.setItem(AUTH_USER_KEY, JSON.stringify(user))
-      
+
+      // 切换任务数据作用域到新登录用户，并通知页面刷新
+      taskStore.handleIdentityChange()
+      emitAuthEvent('login')
+
       logger.info('Login successful', { userId: user.id })
       return { success: true, user }
     } else {
@@ -147,7 +187,7 @@ export async function login(username, password) {
 /**
  * 用户退出登录
  * 清除本地状态和存储
- * 
+ *
  * 使用示例：
  * await logout()
  * router.push('/login')
@@ -155,15 +195,26 @@ export async function login(username, password) {
 export async function logout() {
   try {
     logger.info('Logout', { userId: authState.user?.id })
-    
+
     // 调用退出API（可选，主要用于服务端清理）
     await api.logout()
   } catch (e) {
     // 即使API调用失败，也要清除本地状态
     logger.warn('Logout API failed', e)
   } finally {
-    clearAuth()
+    clearAuth('logout')
   }
+}
+
+/**
+ * 处理登录过期（如接口返回 401）
+ * 清除本地登录态，但语义上区别于用户主动退出，
+ * 便于页面提示"登录已过期"并引导重新登录
+ */
+export function handleSessionExpired() {
+  if (!authState.isLoggedIn && !authState.token) return
+  logger.warn('Session expired', { userId: authState.user?.id })
+  clearAuth('expired')
 }
 
 /**
@@ -200,21 +251,30 @@ export function getCurrentUser() {
 /**
  * 清除认证状态
  * 重置所有状态并清除localStorage
- * 
+ *
+ * @param {string} [reason='logout'] - 清除原因 logout/expired
  * @private
  */
-function clearAuth() {
+function clearAuth(reason = 'logout') {
+  const wasLoggedIn = authState.isLoggedIn || !!authState.token
+
   // 重置状态
   authState.isLoggedIn = false
   authState.user = null
   authState.token = null
   authState.error = null
-  
+
   // 清除存储
   localStorage.removeItem(AUTH_TOKEN_KEY)
   localStorage.removeItem(AUTH_USER_KEY)
-  
-  logger.info('Auth state cleared')
+
+  if (wasLoggedIn) {
+    // 任务数据立即切回游客作用域，确保任何页面都不再展示上一个用户的数据
+    taskStore.handleIdentityChange()
+    emitAuthEvent(reason === 'expired' ? 'expired' : 'logout')
+  }
+
+  logger.info('Auth state cleared', { reason })
 }
 
 // ==================== 默认导出 ====================
@@ -224,6 +284,8 @@ export default {
   initAuth,
   login,
   logout,
+  handleSessionExpired,
   isAuthenticated,
-  getCurrentUser
+  getCurrentUser,
+  onAuthChange
 }
