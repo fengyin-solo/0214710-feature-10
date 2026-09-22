@@ -21,6 +21,7 @@
 
 import { reactive } from 'vue'
 import { api, logger } from './api'
+import { taskStore } from './taskStore'
 
 // ==================== 常量定义 ====================
 
@@ -29,6 +30,9 @@ const AUTH_TOKEN_KEY = 'billiard_token'
 
 /** localStorage中存储用户信息的键名 */
 const AUTH_USER_KEY = 'billiard_user'
+
+/** 登录过期/失效的全局事件名 */
+export const AUTH_EXPIRED_EVENT = 'auth:expired'
 
 // ==================== 响应式状态 ====================
 
@@ -57,8 +61,86 @@ export const authState = reactive({
   user: null,
   token: null,
   loading: false,
-  error: null
+  error: null,
+  /** 全局登录弹窗是否显示（任意页面均可通过 openLoginModal 唤起） */
+  showLoginModal: false,
+  /** 最近一次登录过期的时间戳，用于页面感知并重置自身数据 */
+  expiredAt: 0
 })
+
+// ==================== 全局登录弹窗 ====================
+
+/**
+ * 打开全局登录弹窗
+ * 任何页面/组件都可调用，未登录状态下的入口统一通过它唤起登录
+ */
+export function openLoginModal() {
+  if (!authState.isLoggedIn) {
+    authState.showLoginModal = true
+  }
+}
+
+/**
+ * 关闭全局登录弹窗
+ */
+export function closeLoginModal() {
+  authState.showLoginModal = false
+}
+
+// ==================== 登录过期事件 ====================
+
+/** 登录过期订阅者集合（回调形式，兼容非组件环境与单元测试） */
+const expiredListeners = new Set()
+
+/**
+ * 订阅登录过期事件
+ *
+ * @param {Function} callback - 过期回调
+ * @returns {Function} 取消订阅函数
+ *
+ * 使用示例：
+ * onMounted(() => {
+ *   unsubscribe = onAuthExpired(() => this.resetView())
+ * })
+ */
+export function onAuthExpired(callback) {
+  expiredListeners.add(callback)
+  return () => expiredListeners.delete(callback)
+}
+
+/**
+ * 标记登录状态已过期/失效
+ *
+ * 由 API 层在收到 401 时调用：清除本地登录态与个人数据入口，
+ * 通知所有页面立即重置会话相关数据，并广播 window 事件，
+ * 同时唤起登录弹窗引导重新登录。
+ *
+ * @param {string} [reason] - 过期原因
+ */
+export function handleAuthExpired(reason = '登录已过期，请重新登录') {
+  // 避免未登录状态下重复触发
+  if (!authState.isLoggedIn && !authState.token) {
+    return
+  }
+
+  logger.warn('Auth expired', { reason })
+  clearAuth()
+  authState.expiredAt = Date.now()
+
+  expiredListeners.forEach(callback => {
+    try {
+      callback(reason)
+    } catch (e) {
+      logger.error('Auth expired listener error', e)
+    }
+  })
+
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent(AUTH_EXPIRED_EVENT, { detail: { reason } }))
+  }
+
+  openLoginModal()
+}
 
 // ==================== 公共方法 ====================
 
@@ -75,18 +157,24 @@ export const authState = reactive({
 export function initAuth() {
   const token = localStorage.getItem(AUTH_TOKEN_KEY)
   const userStr = localStorage.getItem(AUTH_USER_KEY)
-  
+
   if (token && userStr) {
     try {
+      const user = JSON.parse(userStr)
       authState.token = token
-      authState.user = JSON.parse(userStr)
+      authState.user = user
       authState.isLoggedIn = true
-      logger.info('Auth initialized from storage', { userId: authState.user?.id })
+      // 任务数据切换到该用户的独立命名空间
+      taskStore.switchUser(user.id)
+      logger.info('Auth initialized from storage', { userId: user?.id })
     } catch (e) {
       // JSON解析失败，清除无效数据
       logger.error('Failed to parse stored user data', e)
       clearAuth()
     }
+  } else {
+    // 未登录使用游客会话（内存数据）
+    taskStore.switchUser(null)
   }
 }
 
@@ -127,7 +215,10 @@ export async function login(username, password) {
       // 持久化存储
       localStorage.setItem(AUTH_TOKEN_KEY, token)
       localStorage.setItem(AUTH_USER_KEY, JSON.stringify(user))
-      
+
+      // 切换到新用户专属的任务命名空间，清空游客/上一个用户的数据视图
+      taskStore.switchUser(user.id)
+
       logger.info('Login successful', { userId: user.id })
       return { success: true, user }
     } else {
@@ -209,11 +300,14 @@ function clearAuth() {
   authState.user = null
   authState.token = null
   authState.error = null
-  
+
   // 清除存储
   localStorage.removeItem(AUTH_TOKEN_KEY)
   localStorage.removeItem(AUTH_USER_KEY)
-  
+
+  // 切回游客会话，立即丢弃上一个用户的任务数据视图
+  taskStore.switchUser(null)
+
   logger.info('Auth state cleared')
 }
 
@@ -225,5 +319,9 @@ export default {
   login,
   logout,
   isAuthenticated,
-  getCurrentUser
+  getCurrentUser,
+  openLoginModal,
+  closeLoginModal,
+  onAuthExpired,
+  handleAuthExpired
 }

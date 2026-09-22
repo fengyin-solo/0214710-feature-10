@@ -33,8 +33,12 @@
     <!-- 页脚组件 -->
     <FooterBar />
     
-    <!-- 登录弹窗 -->
-    <LoginModal v-model="showLoginModal" @success="onLoginSuccess" />
+    <!-- 登录弹窗（全局唯一实例，状态由 auth 模块统一管理） -->
+    <LoginModal
+      :model-value="showLogin"
+      @update:model-value="onLoginModalUpdate"
+      @success="onLoginSuccess"
+    />
   </div>
 </template>
 
@@ -43,24 +47,26 @@
  * 应用根组件
  * 负责整合全局布局组件和管理登录状态
  */
-import { authState } from './utils/auth'
+import { authState, closeLoginModal } from './utils/auth'
 import NavBar from './components/NavBar.vue'
 import FooterBar from './components/FooterBar.vue'
 import LoginModal from './components/LoginModal.vue'
 
 export default {
   name: 'App',
-  components: { 
+  components: {
     NavBar,
     FooterBar,
-    LoginModal 
-  },
-  data() {
-    return {
-      showLoginModal: false // 登录弹窗显示状态
-    }
+    LoginModal
   },
   computed: {
+    /**
+     * 全局登录弹窗显隐
+     * @returns {boolean} 是否显示
+     */
+    showLogin() {
+      return authState.showLoginModal
+    },
     /**
      * 获取用户登录状态
      * @returns {boolean} 是否已登录
@@ -78,17 +84,24 @@ export default {
   },
   methods: {
     /**
-     * 打开登录弹窗
+     * 打开登录弹窗（导航栏登录按钮）
      */
     openLogin() {
-      this.showLoginModal = true
+      authState.showLoginModal = true
     },
     /**
-     * 登录成功回调
-     * 可在此处添加登录成功后的全局处理逻辑
+     * 登录弹窗显隐同步（点击遮罩/关闭按钮）
+     * @param {boolean} visible - 是否显示
+     */
+    onLoginModalUpdate(visible) {
+      if (!visible) closeLoginModal()
+      else authState.showLoginModal = true
+    },
+    /**
+     * 登录成功回调：关闭弹窗，各页面通过响应式状态自行刷新
      */
     onLoginSuccess() {
-      // 登录成功后的处理
+      authState.showLoginModal = false
     }
   }
 }

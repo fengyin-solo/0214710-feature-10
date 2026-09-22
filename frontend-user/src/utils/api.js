@@ -24,7 +24,17 @@ const LOG_LEVELS = { debug: 0, info: 1, warn: 2, error: 3 }
 
 // 任务存储（用于任务中心数据持久化）
 import { taskStore as ts } from './taskStore'
+import { handleAuthExpired } from './auth'
 const taskStore = ts
+
+/**
+ * 标记一次会话过期（统一去重、打日志）
+ * @param {string} message - 后端返回的错误信息
+ */
+function notifySessionExpired(message) {
+  logger.warn('Session expired (401)', { message })
+  handleAuthExpired(message || '登录已过期，请重新登录')
+}
 
 /**
  * 模拟网络延迟
@@ -138,7 +148,15 @@ async function request(url, options = {}) {
     // 检查HTTP状态码
     if (!response.ok) {
       const errorData = await response.json().catch(() => ({}))
-      throw new Error(errorData.error || `HTTP ${response.status}: ${response.statusText}`)
+      const message = errorData.error || `HTTP ${response.status}: ${response.statusText}`
+
+      // 401: 登录已过期，清除会话并通知页面重置数据
+      if (response.status === 401) {
+        notifySessionExpired(errorData.error)
+        return { success: false, error: message, code: 401 }
+      }
+
+      throw new Error(message)
     }
     
     const data = await response.json()
@@ -164,6 +182,16 @@ async function request(url, options = {}) {
  * @returns {Promise<{success: boolean, data: any}>}
  */
 async function mockRequest(url, options) {
+  // 模拟会话过期：测试/联调时设置 localStorage['mock_force_expired'] = '1'，
+  // 所有需要登录的接口将返回 401（登录、退出接口除外）
+  const forceExpired = typeof localStorage !== 'undefined' && localStorage.getItem('mock_force_expired') === '1'
+  const isAuthRequest = url === '/auth/login' || url === '/auth/logout'
+  if (forceExpired && !isAuthRequest) {
+    const message = '登录状态已过期，请重新登录'
+    notifySessionExpired(message)
+    return { success: false, error: message, code: 401 }
+  }
+
   // 模拟网络延迟 500-1000ms
   await delay(500 + Math.random() * 500)
   

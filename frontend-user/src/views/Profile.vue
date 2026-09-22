@@ -257,7 +257,8 @@ export default {
       this.showLogoutModal = false
       logger.info('User logging out')
       await logout()
-      this.$router.push('/login')
+      // 退出后回到首页（应用内无独立 /login 路由，登录通过全局弹窗完成）
+      this.$router.push('/').catch(() => {})
     },
     showNotification(type, title, message) { this.toastType = type; this.toastTitle = title; this.toastMessage = message; this.showToast = true }
   }

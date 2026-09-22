@@ -1,13 +1,32 @@
 /**
  * 任务中心存储管理
- * 统一管理预约、报名、订单等任务数据，使用 localStorage 持久化
+ * 统一管理预约、报名、订单等任务数据
+ *
+ * 会话隔离说明：
+ * - 任务数据按用户ID分别存储（localStorage key 带用户ID后缀），
+ *   切换账号后只会看到当前用户的任务，不会出现上一个用户的数据
+ * - 未登录（游客）会话使用内存存储，不写入 localStorage，
+ *   登录/退出/过期时立即丢弃，避免跨会话污染
+ * - 首次进入的新用户使用默认示例数据初始化自己的命名空间
  */
 
-const STORAGE_KEY = 'billiard_user_tasks'
+const STORAGE_KEY_PREFIX = 'billiard_user_tasks'
+/** 未登录会话的命名空间标识 */
+const GUEST_NAMESPACE = '__guest__'
+
 const logger = {
   info: (...args) => console.log('[taskStore]', ...args),
   warn: (...args) => console.warn('[taskStore]', ...args),
   error: (...args) => console.error('[taskStore]', ...args)
+}
+
+/**
+ * 生成指定命名空间的 localStorage 键名
+ * @param {string} namespace - 用户ID
+ * @returns {string} localStorage 键名
+ */
+function storageKeyFor(namespace) {
+  return `${STORAGE_KEY_PREFIX}_${namespace}`
 }
 
 const taskTypeConfig = {
@@ -106,19 +125,129 @@ const statusConfig = {
   cancelled: { text: '已取消', type: 'success' }
 }
 
+// ==================== 会话（命名空间）管理 ====================
+
+/**
+ * 当前命名空间：登录用户为其用户ID，未登录为游客命名空间
+ * @type {string}
+ */
+let currentNamespace = GUEST_NAMESPACE
+
+/**
+ * 游客会话的内存数据（不持久化，刷新或登录后即失效）
+ * 首次访问时用默认数据初始化
+ * @type {Object<string, Array>|null}
+ */
+let guestMemory = null
+
+/** 任务变更订阅者集合 */
+const listeners = new Set()
+
+/**
+ * 切换任务数据所属的会话
+ *
+ * - 传入用户ID：切换到该用户的 localStorage 命名空间，
+ *   若是该用户首次访问则用默认示例数据初始化
+ * - 不传/传 null：切换到游客的内存会话
+ *
+ * 切换命名空间会通知所有订阅者，保证页面不会展示上一个会话的数据
+ *
+ * @param {string|null} userId - 用户ID，null/undefined 表示游客
+ */
+function switchNamespace(userId) {
+  const nextNamespace = userId ? String(userId) : GUEST_NAMESPACE
+  // 已处于该命名空间（游客内存数据已就绪）时无需重复切换
+  if (nextNamespace === currentNamespace && (nextNamespace !== GUEST_NAMESPACE || guestMemory)) {
+    return
+  }
+
+  currentNamespace = nextNamespace
+
+  if (currentNamespace === GUEST_NAMESPACE) {
+    // 游客会话：独立的内存数据，绝不落盘
+    guestMemory = getDefaultTasks()
+  } else {
+    // 登录用户：首次进入时初始化个人数据
+    const stored = localStorage.getItem(storageKeyFor(currentNamespace))
+    if (stored === null) {
+      saveTasks(getDefaultTasks())
+    }
+    guestMemory = null
+  }
+
+  logger.info('任务数据命名空间已切换', { namespace: currentNamespace })
+  emitChange()
+}
+
+/**
+ * 订阅任务数据变更
+ * @param {Function} callback - 变更回调
+ * @returns {Function} 取消订阅函数
+ */
+function subscribe(callback) {
+  listeners.add(callback)
+  return () => listeners.delete(callback)
+}
+
+/**
+ * 通知所有订阅者任务数据已变更
+ */
+function emitChange() {
+  listeners.forEach(callback => {
+    try {
+      callback()
+    } catch (e) {
+      logger.error('任务变更订阅回调执行失败', e)
+    }
+  })
+}
+
+// ==================== 数据读写 ====================
+
+/**
+ * 读取当前命名空间的任务列表
+ * 解析失败时回退到默认数据，避免单个坏数据导致页面不可用
+ * @returns {Array} 任务列表
+ */
 function loadTasks() {
+  // 游客会话：直接使用内存数据
+  if (currentNamespace === GUEST_NAMESPACE) {
+    if (!guestMemory) {
+      guestMemory = getDefaultTasks()
+    }
+    return guestMemory
+  }
+
+  const key = storageKeyFor(currentNamespace)
   try {
-    const stored = localStorage.getItem(STORAGE_KEY)
-    return stored ? JSON.parse(stored) : getDefaultTasks()
+    const stored = localStorage.getItem(key)
+    if (stored === null) {
+      const defaults = getDefaultTasks()
+      saveTasks(defaults)
+      return defaults
+    }
+    const parsed = JSON.parse(stored)
+    return Array.isArray(parsed) ? parsed : []
   } catch (e) {
     logger.error('加载任务失败', e)
-    return getDefaultTasks()
+    return []
   }
 }
 
+/**
+ * 保存任务列表到当前命名空间
+ * 游客会话仅写内存；登录用户写入对应 localStorage
+ * @param {Array} tasks - 任务列表
+ * @returns {boolean} 是否保存成功
+ */
 function saveTasks(tasks) {
+  if (currentNamespace === GUEST_NAMESPACE) {
+    guestMemory = tasks
+    return true
+  }
+
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(tasks))
+    localStorage.setItem(storageKeyFor(currentNamespace), JSON.stringify(tasks))
     return true
   } catch (e) {
     logger.error('保存任务失败', e)
@@ -197,6 +326,31 @@ function enrichTask(task) {
 }
 
 export const taskStore = {
+  /**
+   * 切换任务数据所属会话（登录/退出/登录过期时调用）
+   * @param {string|null} userId - 用户ID，null 表示游客会话
+   */
+  switchUser(userId) {
+    switchNamespace(userId)
+  },
+
+  /**
+   * 当前命名空间标识（用户ID 或游客标识），主要用于调试/测试
+   * @returns {string}
+   */
+  currentUser() {
+    return currentNamespace
+  },
+
+  /**
+   * 订阅任务数据变更（含会话切换）
+   * @param {Function} callback - 变更回调
+   * @returns {Function} 取消订阅函数
+   */
+  subscribe(callback) {
+    return subscribe(callback)
+  },
+
   getAll() {
     const tasks = loadTasks()
     return tasks.map(enrichTask).sort((a, b) => 
@@ -231,6 +385,7 @@ export const taskStore = {
     tasks.unshift(newTask)
     saveTasks(tasks)
     logger.info('任务已添加', newTask)
+    emitChange()
     return enrichTask(newTask)
   },
 
@@ -244,6 +399,7 @@ export const taskStore = {
     tasks[index] = { ...tasks[index], ...updates }
     saveTasks(tasks)
     logger.info('任务已更新', taskId, updates)
+    emitChange()
     return enrichTask(tasks[index])
   },
 
@@ -265,6 +421,7 @@ export const taskStore = {
     }
     saveTasks(filtered)
     logger.info('任务已删除', taskId)
+    emitChange()
     return true
   },
 
@@ -361,6 +518,7 @@ export const taskStore = {
 
   clearAll() {
     saveTasks([])
+    emitChange()
     logger.info('所有任务已清除')
   }
 }
